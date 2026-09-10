@@ -11,6 +11,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from dotenv import load_dotenv
+from aiohttp import web
 
 
 # =========================================================
@@ -1634,11 +1635,33 @@ async def get_chat_id(message: Message):
 # START BOT
 # =========================================================
 
+async def health_handler(request: web.Request):
+    return web.Response(text="ApnaStore Bot is running")
+
+
+async def start_health_server():
+    """Small HTTP server for Koyeb/Web Service health checks."""
+    app = web.Application()
+    app.router.add_get("/", health_handler)
+    app.router.add_get("/health", health_handler)
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+
+    # Koyeb provides PORT automatically for Web Services.
+    port = int(os.getenv("PORT", "8000"))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+
+    print(f"🌐 Health server listening on 0.0.0.0:{port}")
+    return runner
+
+
 async def main():
     init_db()
 
     if not BOT_TOKEN:
-        print("❌ BOT_TOKEN not found in .env")
+        print("❌ BOT_TOKEN not found in environment variables")
         return
 
     bot = Bot(token=BOT_TOKEN)
@@ -1647,9 +1670,13 @@ async def main():
     print(f"💳 UPI: {UPI_ID}")
     print(f"👑 Admin ID: {ADMIN_ID}")
 
+    health_runner = await start_health_server()
+
     try:
+        # Run Telegram polling and the HTTP health endpoint together.
         await dp.start_polling(bot)
     finally:
+        await health_runner.cleanup()
         await bot.session.close()
         db.close()
 
