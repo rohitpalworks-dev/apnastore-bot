@@ -124,6 +124,105 @@ def init_db():
         key TEXT PRIMARY KEY,
         value TEXT
     );
+
+    CREATE TABLE IF NOT EXISTS admins (
+        user_id INTEGER PRIMARY KEY,
+        role TEXT NOT NULL DEFAULT 'admin',
+        added_by INTEGER,
+        created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS wishlist (
+        user_id INTEGER NOT NULL,
+        product_id INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY(user_id, product_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS coupons (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        code TEXT NOT NULL UNIQUE,
+        kind TEXT NOT NULL DEFAULT 'percent',
+        value REAL NOT NULL DEFAULT 0,
+        max_uses INTEGER NOT NULL DEFAULT 0,
+        used_count INTEGER NOT NULL DEFAULT 0,
+        min_order REAL NOT NULL DEFAULT 0,
+        active INTEGER NOT NULL DEFAULT 1,
+        expires_at TEXT,
+        created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS coupon_uses (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        coupon_id INTEGER NOT NULL,
+        user_id INTEGER NOT NULL,
+        order_id INTEGER,
+        amount_saved REAL NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        UNIQUE(coupon_id, user_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS reviews (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        product_id INTEGER NOT NULL,
+        user_id INTEGER NOT NULL,
+        order_id INTEGER NOT NULL UNIQUE,
+        rating INTEGER NOT NULL,
+        comment TEXT DEFAULT '',
+        created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS notifications (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        title TEXT NOT NULL,
+        body TEXT NOT NULL,
+        is_read INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS support_tickets (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        category TEXT NOT NULL,
+        subject TEXT NOT NULL,
+        message TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'open',
+        order_id INTEGER,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS support_messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ticket_id INTEGER NOT NULL,
+        sender_id INTEGER NOT NULL,
+        message TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS loyalty_points (
+        user_id INTEGER PRIMARY KEY,
+        points INTEGER NOT NULL DEFAULT 0,
+        lifetime_points INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS pass_levels (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL UNIQUE,
+        min_points INTEGER NOT NULL,
+        discount_percent REAL NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS referrals (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        referrer_id INTEGER NOT NULL,
+        referred_user_id INTEGER NOT NULL UNIQUE,
+        reward REAL NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL
+    );
     """)
     db.commit()
 
@@ -138,6 +237,26 @@ def init_db():
     if "sale_price" not in product_columns:
         db.execute("ALTER TABLE products ADD COLUMN sale_price REAL")
 
+    # New customer/profile fields, safe migrations for older databases.
+    user_columns = {row[1] for row in db.execute("PRAGMA table_info(users)").fetchall()}
+    for col, definition in [
+        ("blocked", "INTEGER NOT NULL DEFAULT 0"),
+        ("notification_enabled", "INTEGER NOT NULL DEFAULT 1"),
+        ("referred_by", "INTEGER"),
+        ("referral_credited", "INTEGER NOT NULL DEFAULT 0"),
+    ]:
+        if col not in user_columns:
+            db.execute(f"ALTER TABLE users ADD COLUMN {col} {definition}")
+
+    product_columns = {row[1] for row in db.execute("PRAGMA table_info(products)").fetchall()}
+    if "featured" not in product_columns:
+        db.execute("ALTER TABLE products ADD COLUMN featured INTEGER NOT NULL DEFAULT 0")
+
+    db.execute("INSERT OR IGNORE INTO settings(key,value) VALUES ('referral_reward','10')")
+    db.execute("INSERT OR IGNORE INTO settings(key,value) VALUES ('store_name','ApnaStore')")
+    for name, minimum, discount in [("Basic",0,0),("Silver",100,2),("Gold",300,5),("Elite",750,10)]:
+        db.execute("INSERT OR IGNORE INTO pass_levels(name,min_points,discount_percent,created_at) VALUES (?,?,?,?)", (name, minimum, discount, now()))
+
     # Performance + integrity indexes. The UTR index prevents duplicate
     # payment proofs from being submitted more than once.
     db.execute("CREATE INDEX IF NOT EXISTS idx_stock_product_sold ON stock(product_id, sold, id)")
@@ -148,6 +267,14 @@ def init_db():
         db.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_recharge_utr ON recharge_requests(utr)")
     except sqlite3.IntegrityError:
         logger.warning("Could not create unique UTR index because duplicate legacy UTRs exist.")
+
+    db.execute(
+        """
+        INSERT OR IGNORE INTO admins(user_id, role, added_by, created_at)
+        VALUES (?, 'owner', ?, ?)
+        """,
+        (ADMIN_ID, ADMIN_ID, now()),
+    )
     db.commit()
 
 
@@ -253,6 +380,28 @@ class BroadcastStates(StatesGroup):
     waiting_message = State()
 
 
+class AdminStates(StatesGroup):
+    waiting_add_admin_id = State()
+
+
+class SearchStates(StatesGroup):
+    waiting_query = State()
+
+class CouponApplyStates(StatesGroup):
+    waiting_code = State()
+
+class ReviewStates(StatesGroup):
+    waiting_rating = State()
+    waiting_comment = State()
+
+class CouponCreateStates(StatesGroup):
+    waiting_code = State()
+    waiting_kind = State()
+    waiting_value = State()
+    waiting_min_order = State()
+    waiting_max_uses = State()
+
+
 # =========================================================
 # BOT
 # =========================================================
@@ -262,12 +411,15 @@ dp = Dispatcher()
 
 def main_menu_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🛍️  SHOP NOW  ⚡", callback_data="shop", style="success")],
-        [InlineKeyboardButton(text="💰 WALLET", callback_data="wallet", style="success"),
-         InlineKeyboardButton(text="📦 MY ORDERS", callback_data="orders", style="primary")],
-        [InlineKeyboardButton(text="🔥 TODAY'S DEALS", callback_data="deals", style="success")],
-        [InlineKeyboardButton(text="🎁 REFER & EARN", callback_data="refer", style="success"),
-         InlineKeyboardButton(text="💬 SUPPORT", callback_data="support", style="primary")],
+        [InlineKeyboardButton(text="🛍️  EXPLORE STORE", callback_data="shop", style="success")],
+        [InlineKeyboardButton(text="🔎  SEARCH PRODUCTS", callback_data="search", style="primary")],
+        [InlineKeyboardButton(text="🔥  WHAT'S HOT", callback_data="whats_hot", style="success"), InlineKeyboardButton(text="🆕  NEW ARRIVALS", callback_data="new_arrivals", style="primary")],
+        [InlineKeyboardButton(text="💳  WALLET", callback_data="wallet", style="success"), InlineKeyboardButton(text="📦  MY ORDERS", callback_data="orders", style="primary")],
+        [InlineKeyboardButton(text="❤️  SAVED", callback_data="wishlist", style="primary"), InlineKeyboardButton(text="🎁  REWARDS", callback_data="rewards", style="success")],
+        [InlineKeyboardButton(text="🏆  APNAPASS", callback_data="apnapass", style="primary"), InlineKeyboardButton(text="🔔  NOTIFICATIONS", callback_data="notifications", style="primary")],
+        [InlineKeyboardButton(text="⭐  REVIEWS", callback_data="my_reviews", style="primary"), InlineKeyboardButton(text="🎟️  COUPONS", callback_data="my_coupons", style="success")],
+        [InlineKeyboardButton(text="🆘  HELP CENTER", callback_data="support", style="primary"), InlineKeyboardButton(text="📢  COMMUNITY", url=CHANNEL_LINK, style="primary")],
+        [InlineKeyboardButton(text="👤  MY ACCOUNT", callback_data="account", style="primary")],
     ])
 
 
@@ -351,6 +503,19 @@ async def verify_membership(callback: CallbackQuery):
 
         if valid_channel and valid_group:
             set_verified(user_id, True)
+            ref = db.execute("SELECT referred_by FROM users WHERE user_id=?", (user_id,)).fetchone()
+            if ref and ref["referred_by"] and not db.execute("SELECT 1 FROM referrals WHERE referred_user_id=?", (user_id,)).fetchone():
+                referrer_id = int(ref["referred_by"])
+                if referrer_id != user_id and db.execute("SELECT 1 FROM users WHERE user_id=?", (referrer_id,)).fetchone():
+                    reward = float(get_setting("referral_reward") or 10)
+                    db.execute("UPDATE users SET balance=balance+? WHERE user_id=?", (reward, referrer_id))
+                    db.execute("INSERT INTO wallet_transactions(user_id,amount,type,description,created_at) VALUES (?,?,?,?,?)", (referrer_id,reward,"REFERRAL",f"Referral reward for {user_id}",now()))
+                    db.execute("INSERT INTO referrals(referrer_id,referred_user_id,reward,created_at) VALUES (?,?,?,?)", (referrer_id,user_id,reward,now()))
+                    db.commit()
+                    try:
+                        await callback.bot.send_message(referrer_id, f"🎉 <b>REFERRAL REWARD</b>\n\nYou earned <b>{money(reward)}</b>.\nYour wallet has been credited.", parse_mode="HTML")
+                    except Exception:
+                        pass
             await callback.message.edit_text(
                 "🎉 <b>VERIFICATION COMPLETE!</b>\n"
                 "━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -740,11 +905,30 @@ def admin_keyboard():
         [InlineKeyboardButton(text="💰 WALLET ADJUST", callback_data="admin_wallet", style="success")],
         [InlineKeyboardButton(text="📢 BROADCAST", callback_data="admin_broadcast", style="success")],
         [InlineKeyboardButton(text="🖼️ PAYMENT QR", callback_data="admin_qr", style="primary")],
+        [InlineKeyboardButton(text="👑 ADMINS", callback_data="admin_admins", style="primary")],
     ])
 
 
-def is_admin(user_id):
+def is_super_admin(user_id):
     return user_id == ADMIN_ID
+
+
+def is_admin(user_id):
+    if user_id == ADMIN_ID:
+        return True
+    row = db.execute("SELECT user_id FROM admins WHERE user_id=?", (user_id,)).fetchone()
+    return row is not None
+
+
+def list_admins():
+    return db.execute(
+        """
+        SELECT a.*, u.first_name, u.username
+        FROM admins a
+        LEFT JOIN users u ON u.user_id=a.user_id
+        ORDER BY CASE WHEN a.role='owner' THEN 0 ELSE 1 END, a.created_at ASC
+        """
+    ).fetchall()
 
 
 @dp.message(Command("admin"))
@@ -759,6 +943,184 @@ async def admin_command(message: Message):
         reply_markup=admin_keyboard(),
         parse_mode="HTML"
     )
+
+
+
+@dp.callback_query(F.data == "admin_admins")
+async def admin_admins(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌ Admin only.", show_alert=True)
+        return
+
+    admins = list_admins()
+    lines = ["👑 <b>ADMIN MANAGEMENT</b>\n"]
+    buttons = []
+
+    for admin in admins:
+        name = admin["first_name"] or "User"
+        username = f"@{admin['username']}" if admin["username"] else "No username"
+        role = "👑 OWNER" if admin["role"] == "owner" else "🛡️ ADMIN"
+        lines.append(
+            f"{role}\n"
+            f"👤 {html.escape(name)} ({html.escape(username)})\n"
+            f"🆔 <code>{admin['user_id']}</code>\n"
+            f"🕐 {html.escape(admin['created_at'])}\n"
+        )
+        if admin["role"] != "owner" and is_super_admin(callback.from_user.id):
+            buttons.append([InlineKeyboardButton(
+                text=f"🗑️ REMOVE {admin['user_id']}",
+                callback_data=f"remove_admin:{admin['user_id']}",
+                style="danger",
+            )])
+
+    if is_super_admin(callback.from_user.id):
+        buttons.append([InlineKeyboardButton(
+            text="➕ ADD ADMIN", callback_data="add_admin", style="success"
+        )])
+    else:
+        lines.append("\n🔒 Only the owner can add or remove administrators.")
+
+    buttons.append([InlineKeyboardButton(
+        text="⬅️ ADMIN PANEL", callback_data="admin_back", style="primary"
+    )])
+
+    await callback.message.edit_text(
+        "\n".join(lines),
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "add_admin")
+async def add_admin_start(callback: CallbackQuery, state: FSMContext):
+    if not is_super_admin(callback.from_user.id):
+        await callback.answer("❌ Owner only.", show_alert=True)
+        return
+
+    await state.set_state(AdminStates.waiting_add_admin_id)
+    await callback.message.edit_text(
+        "➕ <b>ADD NEW ADMIN</b>\n\n"
+        "Send the Telegram <b>User ID</b> of the person you want to make an admin.\n\n"
+        "The person should start the bot first so their name/username can be shown here.\n\n"
+        "Example:\n<code>123456789</code>",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="❌ CANCEL", callback_data="add_admin_cancel", style="danger")]
+        ]),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "add_admin_cancel")
+async def add_admin_cancel(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌ Admin only.", show_alert=True)
+        return
+    await state.clear()
+    await callback.message.edit_text(
+        "🛠️ <b>APNASTORE ADMIN PANEL</b>",
+        reply_markup=admin_keyboard(),
+        parse_mode="HTML",
+    )
+    await callback.answer("Cancelled.")
+
+
+@dp.message(AdminStates.waiting_add_admin_id)
+async def add_admin_received(message: Message, state: FSMContext):
+    if not is_super_admin(message.from_user.id):
+        await state.clear()
+        return
+
+    try:
+        new_admin_id = int((message.text or "").strip())
+    except ValueError:
+        await message.answer("❌ Please send a numeric Telegram User ID.")
+        return
+
+    if new_admin_id <= 0:
+        await message.answer("❌ Invalid Telegram User ID.")
+        return
+
+    if new_admin_id == ADMIN_ID:
+        await state.clear()
+        await message.answer("👑 This account is already the permanent owner.", reply_markup=admin_keyboard())
+        return
+
+    existing = db.execute("SELECT user_id FROM admins WHERE user_id=?", (new_admin_id,)).fetchone()
+    if existing:
+        await state.clear()
+        await message.answer("⚠️ This user is already an administrator.", reply_markup=admin_keyboard())
+        return
+
+    target = db.execute(
+        "SELECT user_id, first_name, username FROM users WHERE user_id=?",
+        (new_admin_id,),
+    ).fetchone()
+    if not target:
+        await message.answer(
+            "❌ User not found in ApnaStore database.\n\n"
+            "Ask this person to open the bot and send /start first, then try again."
+        )
+        return
+
+    db.execute(
+        "INSERT INTO admins(user_id, role, added_by, created_at) VALUES (?, 'admin', ?, ?)",
+        (new_admin_id, message.from_user.id, now()),
+    )
+    db.commit()
+    await state.clear()
+
+    username = f"@{target['username']}" if target['username'] else "No username"
+    await message.answer(
+        "✅ <b>ADMIN ADDED</b>\n\n"
+        f"👤 {html.escape(target['first_name'] or 'User')}\n"
+        f"🔗 {html.escape(username)}\n"
+        f"🆔 <code>{new_admin_id}</code>\n\n"
+        "This user can now open <code>/admin</code> and manage the store.",
+        reply_markup=admin_keyboard(),
+        parse_mode="HTML",
+    )
+    try:
+        await message.bot.send_message(
+            new_admin_id,
+            "👑 <b>APNASTORE ADMIN ACCESS</b>\n\n"
+            "You have been added as an administrator.\n\n"
+            "Use /admin to open the Admin Panel.",
+            parse_mode="HTML",
+        )
+    except Exception as error:
+        logger.warning("Could not notify new admin %s: %s", new_admin_id, error)
+
+
+@dp.callback_query(F.data.startswith("remove_admin:"))
+async def remove_admin(callback: CallbackQuery):
+    if not is_super_admin(callback.from_user.id):
+        await callback.answer("❌ Owner only.", show_alert=True)
+        return
+
+    try:
+        admin_id = int(callback.data.split(":", 1)[1])
+    except (ValueError, IndexError):
+        await callback.answer("❌ Invalid admin ID.", show_alert=True)
+        return
+
+    if admin_id == ADMIN_ID:
+        await callback.answer("❌ The permanent owner cannot be removed.", show_alert=True)
+        return
+
+    changed = db.execute(
+        "DELETE FROM admins WHERE user_id=? AND role!='owner'",
+        (admin_id,),
+    ).rowcount
+    db.commit()
+
+    if changed:
+        await callback.answer("✅ Admin access removed.")
+    else:
+        await callback.answer("⚠️ Admin not found.", show_alert=True)
+
+    await admin_admins(callback)
 
 
 @dp.callback_query(F.data == "admin_dashboard")
@@ -1234,12 +1596,15 @@ async def product_details(callback: CallbackQuery):
         await callback.answer("❌ Product unavailable.", show_alert=True)
         return
 
+    avg_row=db.execute("SELECT AVG(rating) avg, COUNT(*) cnt FROM reviews WHERE product_id=?",(product_id,)).fetchone()
+    rating_text=f"⭐ {avg_row['avg']:.1f}/5 ({avg_row['cnt']} reviews)" if avg_row['avg'] else "⭐ No reviews yet"
     text = (
         f"🛍️ <b>{html.escape(p['name'])}</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
         f"💰 <b>Price:</b> ₹{(p['sale_price'] if p['sale_price'] and p['sale_price'] > 0 else p['price']):.2f}" + (f"  <s>₹{p['price']:.2f}</s>" if p['sale_price'] and p['sale_price'] > 0 else "") + "\n"
         f"📦 <b>Available:</b> {p['available']}\n"
-        f"📂 <b>Category:</b> {html.escape(p['category'])}\n\n"
+        f"📂 <b>Category:</b> {html.escape(p['category'])}\n"
+        f"{rating_text}\n\n"
         "📋 <b>PRODUCT DETAILS</b>\n"
         f"{html.escape(p['description'] or 'Premium digital product.')}\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
@@ -1248,7 +1613,8 @@ async def product_details(callback: CallbackQuery):
     )
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🛒 BUY NOW", callback_data=f"buy:{product_id}", style="success")],
+        [InlineKeyboardButton(text="🛒 BUY NOW", callback_data=f"checkout:{product_id}", style="success")],
+        [InlineKeyboardButton(text="❤️ SAVE FOR LATER", callback_data=f"wishlist_add:{product_id}", style="primary")],
         [InlineKeyboardButton(text="⬅️ BACK", callback_data=f"cat:{p['category']}", style="primary")]
     ])
 
@@ -1999,8 +2365,8 @@ async def admin_broadcast_message(message: Message, state: FSMContext):
 # CUSTOMER ORDERS / OTHER
 # =========================================================
 
-@dp.callback_query(F.data == "orders")
-async def orders_handler(callback: CallbackQuery):
+@dp.callback_query(F.data == "legacy_orders")
+async def legacy_orders_handler(callback: CallbackQuery):
     rows = db.execute("""
         SELECT o.*, p.name
         FROM orders o
@@ -2053,8 +2419,8 @@ async def deals_handler(callback: CallbackQuery):
     await callback.answer()
 
 
-@dp.callback_query(F.data == "refer")
-async def refer_handler(callback: CallbackQuery):
+@dp.callback_query(F.data == "legacy_refer")
+async def legacy_refer_handler(callback: CallbackQuery):
     await callback.message.edit_text(
         "🎁 <b>REFER & EARN</b>  •  <i>REWARDS</i>\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -2070,8 +2436,8 @@ async def refer_handler(callback: CallbackQuery):
     await callback.answer()
 
 
-@dp.callback_query(F.data == "support")
-async def support_handler(callback: CallbackQuery):
+@dp.callback_query(F.data == "legacy_support")
+async def legacy_support_handler(callback: CallbackQuery):
     await callback.message.edit_text(
         "💬 <b>APNASTORE SUPPORT</b>  •  <i>HELP CENTER</i>\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -2087,6 +2453,385 @@ async def support_handler(callback: CallbackQuery):
     )
     await callback.answer()
 
+
+
+# =========================================================
+# FINAL ADMIN MENU
+# =========================================================
+
+def admin_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📊 DASHBOARD",callback_data="admin_dashboard",style="primary"),InlineKeyboardButton(text="📈 ANALYTICS",callback_data="admin_analytics",style="primary")],
+        [InlineKeyboardButton(text="🛍️ PRODUCTS",callback_data="admin_products",style="success"),InlineKeyboardButton(text="📦 STOCK",callback_data="admin_stock",style="success")],
+        [InlineKeyboardButton(text="💳 PAYMENTS",callback_data="admin_payments",style="primary"),InlineKeyboardButton(text="🧾 ORDERS",callback_data="admin_orders",style="primary")],
+        [InlineKeyboardButton(text="👥 USERS",callback_data="admin_users",style="primary"),InlineKeyboardButton(text="💰 WALLET",callback_data="admin_wallet",style="success")],
+        [InlineKeyboardButton(text="📢 BROADCAST",callback_data="admin_broadcast",style="success"),InlineKeyboardButton(text="🎟️ COUPONS",callback_data="admin_coupons",style="success")],
+        [InlineKeyboardButton(text="🆘 SUPPORT TICKETS",callback_data="admin_tickets",style="primary")],
+        [InlineKeyboardButton(text="🖼️ QR",callback_data="admin_qr",style="primary"),InlineKeyboardButton(text="💳 UPI",callback_data="admin_upi",style="primary")],
+        [InlineKeyboardButton(text="👑 ADMINS",callback_data="admin_admins",style="primary"),InlineKeyboardButton(text="⚙️ SETTINGS",callback_data="admin_settings_plus",style="primary")],
+    ])
+
+
+
+
+# =========================================================
+# CUSTOMER: ORDERS + DIGITAL LOCKER
+# =========================================================
+
+@dp.callback_query(F.data == "orders")
+async def orders_handler(callback: CallbackQuery):
+    rows=db.execute("SELECT o.*,p.name FROM orders o JOIN products p ON p.id=o.product_id WHERE o.user_id=? ORDER BY o.id DESC LIMIT 20",(callback.from_user.id,)).fetchall()
+    buttons=[]
+    lines=["📦 <b>MY ORDERS</b>\n━━━━━━━━━━━━━━━━━━━━\n"]
+    if not rows:
+        lines.append("🛍️ No orders yet. Start shopping to see your purchases here.")
+    else:
+        for o in rows:
+            lines.append(f"🧾 <b>#{o['id']}</b> • {esc(o['name'])}\n💰 {money(o['amount'])} • 📌 {esc(o['status'])}\n")
+            buttons.append([InlineKeyboardButton(text=f"🔐 ORDER #{o['id']}",callback_data=f"delivery:{o['id']}",style="primary")])
+    buttons.append([InlineKeyboardButton(text="🏠 HOME",callback_data="home",style="primary")])
+    await callback.message.edit_text("\n".join(lines),reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),parse_mode="HTML"); await callback.answer()
+
+# =========================================================
+# CUSTOMER: SEARCH / HOT / NEW / WISHLIST / REWARDS / APNAPASS
+# =========================================================
+
+def money(v):
+    return f"₹{float(v):.2f}"
+
+def esc(v):
+    return html.escape(str(v or ""))
+
+def effective_price(p):
+    sale=p["sale_price"] if "sale_price" in p.keys() else None
+    if sale is not None and float(sale)>0 and float(sale)<float(p["price"]):
+        return float(sale)
+    return float(p["price"])
+
+def ensure_points(user_id):
+    row=db.execute("SELECT * FROM loyalty_points WHERE user_id=?",(user_id,)).fetchone()
+    if row: return row
+    db.execute("INSERT INTO loyalty_points(user_id,points,lifetime_points,updated_at) VALUES (?,?,?,?)",(user_id,0,0,now()))
+    db.commit()
+    return db.execute("SELECT * FROM loyalty_points WHERE user_id=?",(user_id,)).fetchone()
+
+def pass_level(points):
+    return db.execute("SELECT * FROM pass_levels WHERE min_points<=? ORDER BY min_points DESC LIMIT 1",(points,)).fetchone()
+
+def list_products(rows, back="shop"):
+    buttons=[]
+    for p in rows:
+        available=int(p["available"])
+        if available<=0: continue
+        price=effective_price(p)
+        buttons.append([InlineKeyboardButton(text=f"🛍️ {p['name']} • ₹{price:.0f} • {available} left",callback_data=f"product:{p['id']}",style="success")])
+    buttons.append([InlineKeyboardButton(text="⬅️ BACK",callback_data=back,style="primary")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+@dp.callback_query(F.data == "search")
+async def search_start(callback: CallbackQuery,state:FSMContext):
+    await state.set_state(SearchStates.waiting_query)
+    await callback.message.edit_text("🔎 <b>SEARCH PRODUCTS</b>\n\nType a product name, category or keyword:",reply_markup=back_home_keyboard(),parse_mode="HTML")
+    await callback.answer()
+
+@dp.message(SearchStates.waiting_query)
+async def search_received(message: Message,state:FSMContext):
+    q=(message.text or "").strip()
+    if len(q)<2:
+        await message.answer("❌ Enter at least 2 characters."); return
+    rows=db.execute("""SELECT p.*,(SELECT COUNT(*) FROM stock s WHERE s.product_id=p.id AND s.sold=0) available FROM products p WHERE p.active=1 AND (LOWER(p.name) LIKE LOWER(?) OR LOWER(p.category) LIKE LOWER(?) OR LOWER(p.description) LIKE LOWER(?)) ORDER BY p.featured DESC,p.id DESC LIMIT 20""",(f"%{q}%",f"%{q}%",f"%{q}%")).fetchall()
+    await state.clear()
+    await message.answer("🔎 <b>SEARCH RESULTS</b>\n\n"+("No matching products found." if not rows else "Select a product:"),reply_markup=list_products(rows),parse_mode="HTML")
+
+@dp.callback_query(F.data == "whats_hot")
+async def whats_hot(callback: CallbackQuery):
+    rows=db.execute("""SELECT p.*,(SELECT COUNT(*) FROM stock s WHERE s.product_id=p.id AND s.sold=0) available FROM products p WHERE p.active=1 ORDER BY p.featured DESC,p.id DESC LIMIT 15""").fetchall()
+    await callback.message.edit_text("🔥 <b>WHAT'S HOT</b>\n\nTrending products, featured items and current deals:",reply_markup=list_products(rows),parse_mode="HTML"); await callback.answer()
+
+@dp.callback_query(F.data == "new_arrivals")
+async def new_arrivals(callback: CallbackQuery):
+    rows=db.execute("""SELECT p.*,(SELECT COUNT(*) FROM stock s WHERE s.product_id=p.id AND s.sold=0) available FROM products p WHERE p.active=1 ORDER BY p.id DESC LIMIT 15""").fetchall()
+    await callback.message.edit_text("🆕 <b>NEW ARRIVALS</b>\n\nFreshly added products:",reply_markup=list_products(rows),parse_mode="HTML"); await callback.answer()
+
+@dp.callback_query(F.data == "wishlist")
+async def wishlist_handler(callback: CallbackQuery):
+    rows=db.execute("""SELECT p.*,(SELECT COUNT(*) FROM stock s WHERE s.product_id=p.id AND s.sold=0) available FROM wishlist w JOIN products p ON p.id=w.product_id WHERE w.user_id=? ORDER BY w.created_at DESC""",(callback.from_user.id,)).fetchall()
+    buttons=[]
+    for p in rows:
+        buttons.append([InlineKeyboardButton(text=f"❤️ {p['name']} • ₹{effective_price(p):.0f}",callback_data=f"product:{p['id']}",style="primary")])
+    buttons.append([InlineKeyboardButton(text="🏠 HOME",callback_data="home",style="primary")])
+    await callback.message.edit_text("❤️ <b>MY SAVED PRODUCTS</b>\n\n"+("Your wishlist is empty." if not rows else "Select a saved product:"),reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),parse_mode="HTML"); await callback.answer()
+
+@dp.callback_query(F.data.startswith("wishlist_add:"))
+async def wishlist_add(callback: CallbackQuery):
+    pid=int(callback.data.split(":",1)[1]); db.execute("INSERT OR IGNORE INTO wishlist(user_id,product_id,created_at) VALUES (?,?,?)",(callback.from_user.id,pid,now())); db.commit(); await callback.answer("❤️ Saved to wishlist!")
+
+@dp.callback_query(F.data.startswith("wishlist_remove:"))
+async def wishlist_remove(callback: CallbackQuery):
+    pid=int(callback.data.split(":",1)[1]); db.execute("DELETE FROM wishlist WHERE user_id=? AND product_id=?",(callback.from_user.id,pid)); db.commit(); await callback.answer("Removed from wishlist."); await wishlist_handler(callback)
+
+@dp.callback_query(F.data == "rewards")
+async def rewards_handler(callback: CallbackQuery):
+    lp=ensure_points(callback.from_user.id); lvl=pass_level(lp["lifetime_points"])
+    count=db.execute("SELECT COUNT(*) FROM referrals WHERE referrer_id=?",(callback.from_user.id,)).fetchone()[0]
+    earned=db.execute("SELECT COALESCE(SUM(reward),0) FROM referrals WHERE referrer_id=?",(callback.from_user.id,)).fetchone()[0]
+    await callback.message.edit_text(f"🎁 <b>MY REWARDS</b>\n━━━━━━━━━━━━━━━━━━━━\n\n⭐ Points: <b>{lp['points']}</b>\n🏆 ApnaPass: <b>{lvl['name'] if lvl else 'Basic'}</b>\n👥 Referrals: <b>{count}</b>\n💰 Referral earnings: <b>{money(earned)}</b>",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🏆 APNAPASS",callback_data="apnapass",style="primary")],[InlineKeyboardButton(text="🏠 HOME",callback_data="home",style="primary")]]),parse_mode="HTML"); await callback.answer()
+
+@dp.callback_query(F.data == "apnapass")
+async def apnapass_handler(callback: CallbackQuery):
+    lp=ensure_points(callback.from_user.id); current=pass_level(lp["lifetime_points"]); levels=db.execute("SELECT * FROM pass_levels ORDER BY min_points ASC").fetchall(); lines=["🏆 <b>APNAPASS</b>\n","Your loyalty level unlocks better offers.\n"]
+    for level in levels:
+        mark="✅" if current and level['id']==current['id'] else "▫️"
+        lines.append(f"{mark} <b>{level['name']}</b> — {level['min_points']} pts • {level['discount_percent']:.0f}% member discount")
+    await callback.message.edit_text("\n".join(lines),reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🎁 REWARDS",callback_data="rewards",style="success")],[InlineKeyboardButton(text="🏠 HOME",callback_data="home",style="primary")]]),parse_mode="HTML"); await callback.answer()
+
+@dp.callback_query(F.data == "notifications")
+async def notifications_handler(callback: CallbackQuery):
+    rows=db.execute("SELECT * FROM notifications WHERE user_id=? ORDER BY id DESC LIMIT 20",(callback.from_user.id,)).fetchall(); lines=["🔔 <b>NOTIFICATIONS</b>\n"]
+    if not rows: lines.append("You're all caught up. ✅")
+    for n in rows: lines.append(f"{'🔵' if not n['is_read'] else '⚪'} <b>{esc(n['title'])}</b>\n{esc(n['body'])}\n")
+    db.execute("UPDATE notifications SET is_read=1 WHERE user_id=?",(callback.from_user.id,)); db.commit(); await callback.message.edit_text("\n".join(lines),reply_markup=back_home_keyboard(),parse_mode="HTML"); await callback.answer()
+
+@dp.callback_query(F.data == "my_reviews")
+async def my_reviews(callback: CallbackQuery):
+    rows=db.execute("SELECT r.*,p.name FROM reviews r JOIN products p ON p.id=r.product_id WHERE r.user_id=? ORDER BY r.id DESC LIMIT 15",(callback.from_user.id,)).fetchall(); lines=["⭐ <b>MY REVIEWS</b>\n"]
+    if not rows: lines.append("No reviews submitted yet.")
+    for r in rows: lines.append(f"⭐ {r['rating']}/5 • <b>{esc(r['name'])}</b>\n{esc(r['comment'])}\n")
+    await callback.message.edit_text("\n".join(lines),reply_markup=back_home_keyboard(),parse_mode="HTML"); await callback.answer()
+
+# =========================================================
+# CUSTOMER: PROFESSIONAL HELP CENTER
+# =========================================================
+
+@dp.callback_query(F.data == "support")
+async def support_handler_final(callback: CallbackQuery):
+    from urllib.parse import quote
+    templates={
+        "order":"Hello ApnaStore Support Team,\n\nI need assistance regarding my order/delivery.\n\nOrder ID: ______\nUser ID: {uid}\n\nPlease review my order and assist me.\n\nThank you,\nApnaStore Customer",
+        "payment":"Hello ApnaStore Support Team,\n\nI’m facing an issue with my wallet recharge.\n\nRequest ID: ______\nUTR / Transaction ID: ______\nUser ID: {uid}\n\nKindly review my payment and assist me.\n\nThank you,\nApnaStore Customer",
+        "wallet":"Hello ApnaStore Support Team,\n\nI need help with my wallet balance or transaction.\n\nUser ID: {uid}\nTransaction ID: ______\n\nPlease review and assist me.\n\nThank you,\nApnaStore Customer",
+        "product":"Hello ApnaStore Support Team,\n\nI’m facing an issue with a purchased product.\n\nProduct: ______\nOrder ID: ______\nUser ID: {uid}\n\nPlease review my order and assist me.\n\nThank you,\nApnaStore Customer",
+        "coupon":"Hello ApnaStore Support Team,\n\nI’m facing an issue while applying a coupon.\n\nCoupon Code: ______\nUser ID: {uid}\n\nKindly check and assist me.\n\nThank you,\nApnaStore Customer",
+        "referral":"Hello ApnaStore Support Team,\n\nI’m facing an issue regarding my referral or rewards.\n\nUser ID: {uid}\n\nKindly review my referral activity and assist me.\n\nThank you,\nApnaStore Customer",
+        "verification":"Hello ApnaStore Support Team,\n\nI’m unable to complete ApnaStore membership verification.\n\nUser ID: {uid}\n\nKindly assist me with the verification process.\n\nThank you,\nApnaStore Customer",
+        "account":"Hello ApnaStore Support Team,\n\nI need assistance with my ApnaStore account.\n\nUser ID: {uid}\n\nKindly review my account and assist me.\n\nThank you,\nApnaStore Customer",
+    }
+    def link(key): return "https://t.me/CR5PT?text="+quote(templates[key].format(uid=callback.from_user.id))
+    kb=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📦 ORDER / DELIVERY",url=link("order"),style="primary")],
+        [InlineKeyboardButton(text="💳 PAYMENT / RECHARGE",url=link("payment"),style="success")],
+        [InlineKeyboardButton(text="💰 WALLET / BALANCE",url=link("wallet"),style="success")],
+        [InlineKeyboardButton(text="🛍️ PRODUCT PROBLEM",url=link("product"),style="primary")],
+        [InlineKeyboardButton(text="🎟️ COUPON PROBLEM",url=link("coupon"),style="primary")],
+        [InlineKeyboardButton(text="🎁 REFERRAL / REWARDS",url=link("referral"),style="success")],
+        [InlineKeyboardButton(text="🔐 VERIFICATION",url=link("verification"),style="primary")],
+        [InlineKeyboardButton(text="👤 ACCOUNT PROBLEM",url=link("account"),style="primary")],
+        [InlineKeyboardButton(text="🏠 HOME",callback_data="home",style="primary")]
+    ])
+    await callback.message.edit_text("🆘 <b>APNASTORE HELP CENTER</b>\n━━━━━━━━━━━━━━━━━━━━\n\nChoose your issue. A professional ready-to-send message will open for @CR5PT.",reply_markup=kb,parse_mode="HTML"); await callback.answer()
+
+# =========================================================
+# CUSTOMER: ACCOUNT
+# =========================================================
+
+@dp.callback_query(F.data == "account")
+async def account_handler_final(callback: CallbackQuery):
+    ensure_user(callback.from_user); lp=ensure_points(callback.from_user.id); lvl=pass_level(lp['lifetime_points']); orders=db.execute("SELECT COUNT(*) FROM orders WHERE user_id=?",(callback.from_user.id,)).fetchone()[0]; saved=db.execute("SELECT COUNT(*) FROM wishlist WHERE user_id=?",(callback.from_user.id,)).fetchone()[0]
+    await callback.message.edit_text(f"👤 <b>MY ACCOUNT</b>\n━━━━━━━━━━━━━━━━━━━━\n\n🆔 User ID: <code>{callback.from_user.id}</code>\n💰 Wallet: <b>{money(get_balance(callback.from_user.id))}</b>\n📦 Orders: <b>{orders}</b>\n❤️ Saved: <b>{saved}</b>\n⭐ Points: <b>{lp['points']}</b>\n🏆 ApnaPass: <b>{lvl['name'] if lvl else 'Basic'}</b>",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔔 NOTIFICATION SETTINGS",callback_data="notif_settings",style="primary")],[InlineKeyboardButton(text="🏠 HOME",callback_data="home",style="primary")]]),parse_mode="HTML"); await callback.answer()
+
+@dp.callback_query(F.data == "notif_settings")
+async def notif_settings(callback: CallbackQuery):
+    row=db.execute("SELECT notification_enabled FROM users WHERE user_id=?",(callback.from_user.id,)).fetchone(); on=bool(row and row['notification_enabled'])
+    await callback.message.edit_text(f"🔔 <b>NOTIFICATIONS</b>\n\nStatus: <b>{'ON' if on else 'OFF'}</b>",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔄 TOGGLE",callback_data="notif_toggle",style="primary")],[InlineKeyboardButton(text="⬅️ ACCOUNT",callback_data="account",style="primary")]]),parse_mode="HTML"); await callback.answer()
+
+@dp.callback_query(F.data == "notif_toggle")
+async def notif_toggle(callback: CallbackQuery):
+    row=db.execute("SELECT notification_enabled FROM users WHERE user_id=?",(callback.from_user.id,)).fetchone(); val=0 if row and row['notification_enabled'] else 1; db.execute("UPDATE users SET notification_enabled=? WHERE user_id=?",(val,callback.from_user.id)); db.commit(); await callback.answer("Notifications updated"); await notif_settings(callback)
+
+# =========================================================
+# CUSTOMER: CHECKOUT + COUPONS + DELIVERY LOCKER + REVIEWS
+# =========================================================
+
+@dp.callback_query(F.data.startswith("checkout:"))
+async def checkout_handler(callback: CallbackQuery):
+    pid=int(callback.data.split(":",1)[1]); p=db.execute("SELECT p.*,(SELECT COUNT(*) FROM stock s WHERE s.product_id=p.id AND s.sold=0) available FROM products p WHERE p.id=? AND p.active=1",(pid,)).fetchone()
+    if not p or int(p['available'])<=0: return await callback.answer("❌ Out of stock.",show_alert=True)
+    price=effective_price(p); await callback.message.edit_text(f"🛒 <b>CHECKOUT</b>\n━━━━━━━━━━━━━━━━━━━━\n\n🛍️ <b>{esc(p['name'])}</b>\n💰 Price: <b>{money(price)}</b>\n💳 Wallet: <b>{money(get_balance(callback.from_user.id))}</b>\n📦 Stock: <b>{p['available']}</b>",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🎟️ APPLY COUPON",callback_data=f"coupon_apply:{pid}",style="primary")],[InlineKeyboardButton(text="✅ CONFIRM PURCHASE",callback_data=f"confirm_buy:{pid}",style="success")],[InlineKeyboardButton(text="❤️ SAVE",callback_data=f"wishlist_add:{pid}",style="primary")],[InlineKeyboardButton(text="⬅️ BACK",callback_data=f"product:{pid}",style="primary")]]),parse_mode="HTML"); await callback.answer()
+
+@dp.callback_query(F.data.startswith("coupon_apply:"))
+async def coupon_apply_start(callback: CallbackQuery,state:FSMContext):
+    await state.set_state(CouponApplyStates.waiting_code); await state.update_data(product_id=int(callback.data.split(":",1)[1])); await callback.message.answer("🎟️ <b>APPLY COUPON</b>\n\nSend coupon code:",parse_mode="HTML"); await callback.answer()
+
+@dp.message(CouponApplyStates.waiting_code)
+async def coupon_apply_received(message: Message,state:FSMContext):
+    code=(message.text or '').strip().upper(); c=db.execute("SELECT * FROM coupons WHERE code=? AND active=1",(code,)).fetchone(); data=await state.get_data()
+    if not c: await message.answer("❌ Invalid or inactive coupon."); return
+    if c['max_uses'] and c['used_count']>=c['max_uses']: await message.answer("❌ Coupon usage limit reached."); await state.clear(); return
+    if db.execute("SELECT 1 FROM coupon_uses WHERE coupon_id=? AND user_id=?",(c['id'],message.from_user.id)).fetchone(): await message.answer("⚠️ You have already used this coupon."); await state.clear(); return
+    p=db.execute("SELECT * FROM products WHERE id=?",(data['product_id'],)).fetchone(); price=effective_price(p)
+    if price < c['min_order']: await message.answer(f"❌ Minimum order is {money(c['min_order'])}."); await state.clear(); return
+    saved=min(price*(c['value']/100) if c['kind']=='percent' else c['value'],price); final=price-saved
+    set_setting(f"pending_coupon:{message.from_user.id}",f"{code}|{data['product_id']}|{saved:.2f}|{final:.2f}"); await state.clear()
+    await message.answer(f"✅ <b>COUPON APPLIED</b>\n\n🎟️ <code>{esc(code)}</code>\n💰 Original: <s>{money(price)}</s>\n🏷️ Saved: <b>{money(saved)}</b>\n✅ Final: <b>{money(final)}</b>",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ CONFIRM PURCHASE",callback_data=f"confirm_buy:{data['product_id']}",style="success")],[InlineKeyboardButton(text="🏠 HOME",callback_data="home",style="primary")]]),parse_mode="HTML")
+
+async def purchase_core(bot,user_id,pid):
+    p=db.execute("SELECT p.*,(SELECT COUNT(*) FROM stock s WHERE s.product_id=p.id AND s.sold=0) available FROM products p WHERE p.id=? AND p.active=1",(pid,)).fetchone()
+    if not p or int(p['available'])<=0: return None,"❌ Out of stock."
+    base=effective_price(p); final=base; saved=0.0; coupon=None
+    pending=get_setting(f"pending_coupon:{user_id}")
+    if pending:
+        try:
+            code,spid,ss,sf=pending.split('|',3)
+            if int(spid)==pid: coupon=code; saved=float(ss); final=float(sf)
+        except Exception: pass
+    if get_balance(user_id)<final: return None,f"❌ Insufficient balance. Need {money(final)}."
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        stock=db.execute("SELECT * FROM stock WHERE product_id=? AND sold=0 ORDER BY id LIMIT 1",(pid,)).fetchone()
+        if not stock: db.rollback(); return None,"❌ Stock just sold out."
+        if db.execute("UPDATE users SET balance=balance-? WHERE user_id=? AND balance>=?",(final,user_id,final)).rowcount!=1: db.rollback(); return None,"❌ Insufficient balance."
+        if db.execute("UPDATE stock SET sold=1,sold_to=?,sold_at=? WHERE id=? AND sold=0",(user_id,now(),stock['id'])).rowcount!=1: db.rollback(); return None,"❌ Stock changed. Try again."
+        db.execute("INSERT INTO orders(user_id,product_id,stock_id,amount,item,created_at) VALUES (?,?,?,?,?,?)",(user_id,pid,stock['id'],final,stock['item'],now())); order_id=db.execute("SELECT last_insert_rowid() id").fetchone()['id']
+        db.execute("INSERT INTO wallet_transactions(user_id,amount,type,description,created_at) VALUES (?,?,?,?,?)",(user_id,-final,'PURCHASE',f"Purchase: {p['name']}",now()))
+        points=max(1,int(final//10)); ensure_points(user_id); db.execute("UPDATE loyalty_points SET points=points+?,lifetime_points=lifetime_points+?,updated_at=? WHERE user_id=?",(points,points,now(),user_id))
+        if coupon:
+            c=db.execute("SELECT id FROM coupons WHERE code=?",(coupon,)).fetchone()
+            if c:
+                db.execute("UPDATE coupons SET used_count=used_count+1 WHERE id=?",(c['id'],)); db.execute("INSERT OR IGNORE INTO coupon_uses(coupon_id,user_id,order_id,amount_saved,created_at) VALUES (?,?,?,?,?)",(c['id'],user_id,order_id,saved,now()))
+            db.execute("DELETE FROM settings WHERE key=?",(f"pending_coupon:{user_id}",))
+        db.commit()
+    except Exception:
+        db.rollback(); logger.exception('purchase_core failed'); return None,"⚠️ Purchase failed. Try again."
+    return (order_id,p,final,saved,stock['item']),None
+
+@dp.callback_query(F.data.startswith("confirm_buy:"))
+async def confirm_buy_handler(callback: CallbackQuery):
+    pid=int(callback.data.split(":",1)[1]); result,error=await purchase_core(callback.bot,callback.from_user.id,pid)
+    if error: return await callback.answer(error,show_alert=True)
+    oid,p,final,saved,item=result; await callback.message.edit_text(f"🎉 <b>PURCHASE SUCCESSFUL</b>\n━━━━━━━━━━━━━━━━━━━━\n\n🧾 Order: <code>#{oid}</code>\n🛍️ <b>{esc(p['name'])}</b>\n💰 Paid: <b>{money(final)}</b>\n🏷️ Saved: <b>{money(saved)}</b>\n💳 Balance: <b>{money(get_balance(callback.from_user.id))}</b>\n\n🔐 <b>DIGITAL LOCKER</b>\n<code>{esc(item)}</code>",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📦 VIEW DELIVERY",callback_data=f"delivery:{oid}",style="success")],[InlineKeyboardButton(text="🏠 HOME",callback_data="home",style="primary")]]),parse_mode="HTML"); await callback.answer("✅ Purchase successful!")
+
+@dp.callback_query(F.data.startswith("delivery:"))
+async def delivery_handler(callback: CallbackQuery):
+    oid=int(callback.data.split(":",1)[1]); o=db.execute("SELECT o.*,p.name FROM orders o JOIN products p ON p.id=o.product_id WHERE o.id=? AND o.user_id=?",(oid,callback.from_user.id)).fetchone()
+    if not o: return await callback.answer("❌ Order not found.",show_alert=True)
+    await callback.message.edit_text(f"🔐 <b>DIGITAL LOCKER</b>\n━━━━━━━━━━━━━━━━━━━━\n\n🧾 Order: <code>#{oid}</code>\n🛍️ {esc(o['name'])}\n💰 {money(o['amount'])}\n📦 <code>{esc(o['item'])}</code>",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⭐ WRITE REVIEW",callback_data=f"review:{oid}",style="primary")],[InlineKeyboardButton(text="🆘 REPORT ISSUE",url="https://t.me/CR5PT",style="danger")],[InlineKeyboardButton(text="⬅️ ORDERS",callback_data="orders",style="primary")]]),parse_mode="HTML"); await callback.answer()
+
+@dp.callback_query(F.data.startswith("review:"))
+async def review_start(callback: CallbackQuery,state:FSMContext):
+    oid=int(callback.data.split(":",1)[1]); o=db.execute("SELECT * FROM orders WHERE id=? AND user_id=?",(oid,callback.from_user.id)).fetchone()
+    if not o: return await callback.answer("❌ Order not found.",show_alert=True)
+    if db.execute("SELECT 1 FROM reviews WHERE order_id=?",(oid,)).fetchone(): return await callback.answer("⚠️ Already reviewed.",show_alert=True)
+    await state.update_data(order_id=oid,product_id=o['product_id']); await state.set_state(ReviewStates.waiting_rating); await callback.message.answer("⭐ <b>RATE YOUR ORDER</b>\n\nSend a rating from 1 to 5:",parse_mode="HTML"); await callback.answer()
+
+@dp.message(ReviewStates.waiting_rating)
+async def review_rating_received(message: Message,state:FSMContext):
+    try: rating=int((message.text or '').strip())
+    except ValueError: rating=0
+    if rating<1 or rating>5: await message.answer("❌ Send a number from 1 to 5."); return
+    await state.update_data(rating=rating); await state.set_state(ReviewStates.waiting_comment); await message.answer("📝 Send your review, or type <code>skip</code>.",parse_mode="HTML")
+
+@dp.message(ReviewStates.waiting_comment)
+async def review_comment_received(message: Message,state:FSMContext):
+    d=await state.get_data(); comment=(message.text or '').strip(); comment='' if comment.lower()=='skip' else comment; db.execute("INSERT INTO reviews(product_id,user_id,order_id,rating,comment,created_at) VALUES (?,?,?,?,?,?)",(d['product_id'],message.from_user.id,d['order_id'],d['rating'],comment,now())); db.commit(); await state.clear(); await message.answer("✅ <b>REVIEW SUBMITTED</b>",reply_markup=home_button(),parse_mode="HTML")
+
+# =========================================================
+# CUSTOMER: ORDERS UPGRADE
+# =========================================================
+
+@dp.callback_query(F.data == "orders_plus")
+async def orders_plus(callback: CallbackQuery):
+    await orders_handler(callback)
+
+# =========================================================
+# ADMIN: ANALYTICS / COUPONS / TICKETS / SETTINGS PLUS
+# =========================================================
+
+@dp.callback_query(F.data == "admin_analytics")
+async def admin_analytics_final(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id): return await callback.answer("❌ Admin only.",show_alert=True)
+    sales=db.execute("SELECT COALESCE(SUM(amount),0) FROM orders").fetchone()[0]; recharge=db.execute("SELECT COALESCE(SUM(amount),0) FROM recharge_requests WHERE status='approved'").fetchone()[0]; orders=db.execute("SELECT COUNT(*) FROM orders").fetchone()[0]; users=db.execute("SELECT COUNT(*) FROM users").fetchone()[0]; stock=db.execute("SELECT COUNT(*) FROM stock WHERE sold=0").fetchone()[0]
+    await callback.message.edit_text(f"📈 <b>SALES ANALYTICS</b>\n━━━━━━━━━━━━━━━━━━━━\n\n💰 Sales: <b>{money(sales)}</b>\n💳 Approved Recharge: <b>{money(recharge)}</b>\n🧾 Orders: <b>{orders}</b>\n👥 Users: <b>{users}</b>\n📦 Available Stock: <b>{stock}</b>",reply_markup=admin_back_keyboard(),parse_mode="HTML"); await callback.answer()
+
+@dp.callback_query(F.data == "admin_tickets")
+async def admin_tickets_final(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id): return await callback.answer("❌ Admin only.",show_alert=True)
+    rows=db.execute("SELECT * FROM support_tickets WHERE status!='closed' ORDER BY id DESC LIMIT 30").fetchall(); lines=["🆘 <b>SUPPORT TICKETS</b>\n"]; buttons=[]
+    if not rows: lines.append("No open tickets.")
+    for t in rows:
+        lines.append(f"🎫 <b>#{t['id']}</b> • {esc(t['category'])}\n👤 <code>{t['user_id']}</code>\n{esc(t['subject'])}\n")
+        buttons.append([InlineKeyboardButton(text=f"👁️ VIEW #{t['id']}",callback_data=f"ticket:{t['id']}",style="primary")])
+    buttons.append([InlineKeyboardButton(text="⬅️ ADMIN",callback_data="admin_back",style="primary")]); await callback.message.edit_text("\n".join(lines),reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),parse_mode="HTML"); await callback.answer()
+
+@dp.callback_query(F.data.startswith("ticket:"))
+async def ticket_view_final(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id): return await callback.answer("❌ Admin only.",show_alert=True)
+    tid=int(callback.data.split(":",1)[1]); t=db.execute("SELECT * FROM support_tickets WHERE id=?",(tid,)).fetchone();
+    if not t: return await callback.answer("❌ Ticket not found.",show_alert=True)
+    msgs=db.execute("SELECT * FROM support_messages WHERE ticket_id=? ORDER BY id ASC",(tid,)).fetchall(); lines=[f"🎫 <b>TICKET #{tid}</b>",f"👤 User: <code>{t['user_id']}</code>",f"📂 {esc(t['category'])}",f"📌 {esc(t['subject'])}",f"📝 {esc(t['message'])}","","<b>Conversation</b>"]
+    for m in msgs: lines.append(f"• <code>{m['sender_id']}</code>: {esc(m['message'])}")
+    await callback.message.edit_text("\n".join(lines),reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ CLOSE TICKET",callback_data=f"close_ticket:{tid}",style="danger")],[InlineKeyboardButton(text="⬅️ TICKETS",callback_data="admin_tickets",style="primary")]]),parse_mode="HTML"); await callback.answer()
+
+@dp.callback_query(F.data.startswith("close_ticket:"))
+async def close_ticket_final(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id): return await callback.answer("❌ Admin only.",show_alert=True)
+    tid=int(callback.data.split(":",1)[1]); row=db.execute("SELECT user_id FROM support_tickets WHERE id=?",(tid,)).fetchone(); db.execute("UPDATE support_tickets SET status='closed',updated_at=? WHERE id=?",(now(),tid)); db.commit()
+    if row:
+        try: await callback.bot.send_message(row['user_id'],f"✅ <b>SUPPORT TICKET #{tid} CLOSED</b>\n\nYour issue has been marked resolved.",parse_mode="HTML")
+        except Exception: pass
+    await callback.answer("✅ Ticket closed"); await admin_tickets_final(callback)
+
+@dp.callback_query(F.data == "admin_coupons")
+async def admin_coupons_final(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id): return await callback.answer("❌ Admin only.",show_alert=True)
+    rows=db.execute("SELECT * FROM coupons ORDER BY id DESC LIMIT 30").fetchall(); lines=["🎟️ <b>COUPON MANAGER</b>\n"]; buttons=[]
+    if not rows: lines.append("No coupons yet.")
+    for c in rows:
+        value=f"{c['value']:.0f}% OFF" if c['kind']=='percent' else f"₹{c['value']:.0f} OFF"; state="🟢" if c['active'] else "🔴"; lines.append(f"{state} <code>{esc(c['code'])}</code> • {value} • Used {c['used_count']}/{c['max_uses'] or '∞'}")
+    buttons.append([InlineKeyboardButton(text="➕ ADD COUPON",callback_data="coupon_add",style="success")]); buttons.append([InlineKeyboardButton(text="⬅️ ADMIN",callback_data="admin_back",style="primary")]); await callback.message.edit_text("\n".join(lines),reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),parse_mode="HTML"); await callback.answer()
+
+@dp.callback_query(F.data == "coupon_add")
+async def coupon_add_start(callback: CallbackQuery,state:FSMContext):
+    if not is_admin(callback.from_user.id): return await callback.answer("❌ Admin only.",show_alert=True)
+    await state.set_state(CouponCreateStates.waiting_code); await callback.message.answer("🎟️ <b>CREATE COUPON</b>\n\nSend code, e.g. <code>SAVE20</code>.",parse_mode="HTML"); await callback.answer()
+
+@dp.message(CouponCreateStates.waiting_code)
+async def coupon_code_step(message: Message,state:FSMContext):
+    code=(message.text or '').strip().upper()
+    if not re.fullmatch(r'[A-Z0-9_-]{3,30}',code): await message.answer("❌ Invalid code."); return
+    if db.execute("SELECT 1 FROM coupons WHERE code=?",(code,)).fetchone(): await message.answer("❌ Coupon exists."); return
+    await state.update_data(code=code); await state.set_state(CouponCreateStates.waiting_kind); await message.answer("Send <code>percent</code> or <code>flat</code>.",parse_mode="HTML")
+
+@dp.message(CouponCreateStates.waiting_kind)
+async def coupon_kind_step(message: Message,state:FSMContext):
+    kind=(message.text or '').strip().lower()
+    if kind not in ('percent','flat'): await message.answer("❌ Type percent or flat."); return
+    await state.update_data(kind=kind); await state.set_state(CouponCreateStates.waiting_value); await message.answer("Send discount value, e.g. <code>20</code>.",parse_mode="HTML")
+
+@dp.message(CouponCreateStates.waiting_value)
+async def coupon_value_step(message: Message,state:FSMContext):
+    try: value=float((message.text or '').strip())
+    except ValueError: await message.answer("❌ Invalid value."); return
+    d=await state.get_data()
+    if value<=0 or (d['kind']=='percent' and value>100): await message.answer("❌ Invalid discount."); return
+    await state.update_data(value=value); await state.set_state(CouponCreateStates.waiting_min_order); await message.answer("Minimum order? Send <code>0</code> for none.",parse_mode="HTML")
+
+@dp.message(CouponCreateStates.waiting_min_order)
+async def coupon_min_step(message: Message,state:FSMContext):
+    try: minimum=max(0,float((message.text or '').strip()))
+    except ValueError: await message.answer("❌ Invalid amount."); return
+    await state.update_data(minimum=minimum); await state.set_state(CouponCreateStates.waiting_max_uses); await message.answer("Maximum total uses? Send <code>0</code> for unlimited.",parse_mode="HTML")
+
+@dp.message(CouponCreateStates.waiting_max_uses)
+async def coupon_max_step(message: Message,state:FSMContext):
+    try: max_uses=int((message.text or '').strip())
+    except ValueError: await message.answer("❌ Invalid number."); return
+    if max_uses<0: await message.answer("❌ Use 0 or a positive number."); return
+    d=await state.get_data(); db.execute("INSERT INTO coupons(code,kind,value,max_uses,min_order,active,created_at) VALUES (?,?,?,?,?,1,?)",(d['code'],d['kind'],d['value'],max_uses,d['minimum'],now())); db.commit(); await state.clear(); await message.answer(f"✅ <b>COUPON CREATED</b>\n\n🎟️ <code>{esc(d['code'])}</code>",reply_markup=admin_keyboard(),parse_mode="HTML")
+
+@dp.callback_query(F.data == "admin_settings_plus")
+async def admin_settings_plus(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id): return await callback.answer("❌ Admin only.",show_alert=True)
+    await callback.message.edit_text(f"⚙️ <b>STORE SETTINGS</b>\n\n💳 UPI: <code>{esc(get_setting('upi_id') or '')}</code>\n💬 Support: @CR5PT\n🎁 Referral Reward: <b>{money(float(get_setting('referral_reward') or 10))}</b>\n🛠️ Maintenance: <b>{'ON' if get_setting('maintenance')=='1' else 'OFF'}</b>",reply_markup=admin_back_keyboard(),parse_mode="HTML"); await callback.answer()
 
 # =========================================================
 # ID COMMAND
