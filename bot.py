@@ -20,7 +20,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s"
 )
-logger = logging.getLogger("apnastore")
+logger = logging.getLogger("Vouchora")
 
 
 # =========================================================
@@ -34,8 +34,8 @@ BOT_TOKEN = ("9040892921:AAHNwJQ5d85SIDxCTBFuUptuaGLTLYtIyL0")
 
 ADMIN_ID = 7464364112
 
-CHANNEL_USERNAME = "@apnaxstore"
-CHANNEL_LINK = "https://t.me/apnaxstore"
+CHANNEL_USERNAME = "@vouchora_in"
+CHANNEL_LINK = "https://t.me/vouchora_in"
 
 GROUP_ID = -1004462426006
 GROUP_LINK = "https://t.me/+MRaSyFL47X40ZjU9"
@@ -45,7 +45,7 @@ UPI_ID = "rohitpalpersonal-2@okicici"
 MIN_RECHARGE = 10
 MAX_RECHARGE = 10000
 
-DB_FILE = BASE_DIR / "apnastore.db"
+DB_FILE = BASE_DIR / "Vouchora.db"
 
 
 # =========================================================
@@ -226,7 +226,7 @@ def init_db():
     """)
     db.commit()
 
-    # Migrate older ApnaStore databases safely.
+    # Migrate older vouchora databases safely.
     columns = {row[1] for row in db.execute("PRAGMA table_info(users)").fetchall()}
     if "verified" not in columns:
         db.execute("ALTER TABLE users ADD COLUMN verified INTEGER NOT NULL DEFAULT 0")
@@ -253,7 +253,7 @@ def init_db():
         db.execute("ALTER TABLE products ADD COLUMN featured INTEGER NOT NULL DEFAULT 0")
 
     db.execute("INSERT OR IGNORE INTO settings(key,value) VALUES ('referral_reward','10')")
-    db.execute("INSERT OR IGNORE INTO settings(key,value) VALUES ('store_name','ApnaStore')")
+    db.execute("INSERT OR IGNORE INTO settings(key,value) VALUES ('store_name','Vouchora')")
     for name, minimum, discount in [("Basic",0,0),("Silver",100,2),("Gold",300,5),("Elite",750,10)]:
         db.execute("INSERT OR IGNORE INTO pass_levels(name,min_points,discount_percent,created_at) VALUES (?,?,?,?)", (name, minimum, discount, now()))
 
@@ -416,7 +416,7 @@ def main_menu_keyboard():
         [InlineKeyboardButton(text="🔥  WHAT'S HOT", callback_data="whats_hot", style="success"), InlineKeyboardButton(text="🆕  NEW ARRIVALS", callback_data="new_arrivals", style="primary")],
         [InlineKeyboardButton(text="💳  WALLET", callback_data="wallet", style="success"), InlineKeyboardButton(text="📦  MY ORDERS", callback_data="orders", style="primary")],
         [InlineKeyboardButton(text="❤️  SAVED", callback_data="wishlist", style="primary"), InlineKeyboardButton(text="🎁  REWARDS", callback_data="rewards", style="success")],
-        [InlineKeyboardButton(text="🏆  APNAPASS", callback_data="apnapass", style="primary"), InlineKeyboardButton(text="🔔  NOTIFICATIONS", callback_data="notifications", style="primary")],
+        [InlineKeyboardButton(text="🏆  Vouchora", callback_data="apnapass", style="primary"), InlineKeyboardButton(text="🔔  NOTIFICATIONS", callback_data="notifications", style="primary")],
         [InlineKeyboardButton(text="⭐  REVIEWS", callback_data="my_reviews", style="primary"), InlineKeyboardButton(text="🎟️  COUPONS", callback_data="my_coupons", style="success")],
         [InlineKeyboardButton(text="🆘  HELP CENTER", callback_data="support", style="primary"), InlineKeyboardButton(text="📢  COMMUNITY", url=CHANNEL_LINK, style="primary")],
         [InlineKeyboardButton(text="👤  MY ACCOUNT", callback_data="account", style="primary")],
@@ -450,7 +450,7 @@ async def start_handler(message: Message):
     if is_verified(message.from_user.id):
         balance = get_balance(message.from_user.id)
         await message.answer(
-            "💙 <b>APNASTORE</b>  •  <i>YOUR DIGITAL STORE</i>\n"
+            "💙 <b>Vouchora</b>  •  <i>YOUR DIGITAL STORE</i>\n"
             "━━━━━━━━━━━━━━━━━━━━\n\n"
             f"👋 <b>Welcome back, {html.escape(message.from_user.first_name or 'there')}!</b>\n"
             "Great to see you again. Your store is ready. 🚀\n\n"
@@ -468,7 +468,7 @@ async def start_handler(message: Message):
         return
 
     await message.answer(
-        "💙 <b>WELCOME TO APNASTORE</b>\n"
+        "💙 <b>WELCOME TO VOUCHORA</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
         "🛍️ <b>Your trusted digital store</b>\n"
         "Discover subscriptions, vouchers and digital products — all in one place. ✨\n\n"
@@ -478,7 +478,7 @@ async def start_handler(message: Message):
         "━━━━━━━━━━━━━━━━━━━━\n"
         "🔐 <b>ONE-TIME VERIFICATION</b>\n\n"
         "Join our official <b>Channel</b> and <b>Community</b>, then verify your membership.\n\n"
-        "✨ <i>One quick verification unlocks your complete ApnaStore experience.</i>\n"
+        "✨ <i>One quick verification unlocks your complete Vouchora experience.</i>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         "👇 <b>JOIN • VERIFY • SHOP</b>",
         reply_markup=join_keyboard(),
@@ -519,7 +519,7 @@ async def verify_membership(callback: CallbackQuery):
             await callback.message.edit_text(
                 "🎉 <b>VERIFICATION COMPLETE!</b>\n"
                 "━━━━━━━━━━━━━━━━━━━━\n\n"
-                f"👋 Welcome to <b>ApnaStore</b>, {html.escape(callback.from_user.first_name or 'there')}!\n\n"
+                f"👋 Welcome to <b>vouchorab>, {html.escape(callback.from_user.first_name or 'there')}!\n\n"
                 "Your membership is verified and your store is unlocked. 🔓\n\n"
                 "🛍️ Browse products\n"
                 "💰 Manage your wallet\n"
@@ -558,7 +558,7 @@ async def verify_membership(callback: CallbackQuery):
 async def home_handler(callback: CallbackQuery):
     ensure_user(callback.from_user)
     await callback.message.edit_text(
-        "🏠 <b>APNASTORE</b>  •  <i>HOME</i>\n"
+        "🏠 <b>Vouchora</b>  •  <i>HOME</i>\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
         f"👋 <b>Hi {html.escape(callback.from_user.first_name or 'there')}!</b>\n"
         "Everything you need is just a tap away. ✨\n\n"
@@ -599,7 +599,7 @@ async def wallet_handler(callback: CallbackQuery):
         "⚡ Add balance securely, then use your wallet for quick checkout.\n\n"
         "💡 <b>HOW IT WORKS</b>\n"
         "➕ Add Balance  →  🛍️ Choose Product  →  💳 Pay  →  📦 Receive Item\n\n"
-        "🔐 <i>Your wallet is for ApnaStore purchases only.</i>",
+        "🔐 <i>Your wallet is for Vouchora purchases only.</i>",
         reply_markup=wallet_keyboard(),
         parse_mode="HTML"
     )
@@ -938,7 +938,7 @@ async def admin_command(message: Message):
         return
 
     await message.answer(
-        "🛠️ <b>APNASTORE ADMIN PANEL</b>\n\n"
+        "🛠️ <b>Vouchora ADMIN PANEL</b>\n\n"
         "Manage payments, products, stock, users, wallet and QR.",
         reply_markup=admin_keyboard(),
         parse_mode="HTML"
@@ -1019,7 +1019,7 @@ async def add_admin_cancel(callback: CallbackQuery, state: FSMContext):
         return
     await state.clear()
     await callback.message.edit_text(
-        "🛠️ <b>APNASTORE ADMIN PANEL</b>",
+        "🛠️ <b>Vouchora ADMIN PANEL</b>",
         reply_markup=admin_keyboard(),
         parse_mode="HTML",
     )
@@ -1059,7 +1059,7 @@ async def add_admin_received(message: Message, state: FSMContext):
     ).fetchone()
     if not target:
         await message.answer(
-            "❌ User not found in ApnaStore database.\n\n"
+            "❌ User not found in Vouchora database.\n\n"
             "Ask this person to open the bot and send /start first, then try again."
         )
         return
@@ -1084,7 +1084,7 @@ async def add_admin_received(message: Message, state: FSMContext):
     try:
         await message.bot.send_message(
             new_admin_id,
-            "👑 <b>APNASTORE ADMIN ACCESS</b>\n\n"
+            "👑 <b>Vouchora ADMIN ACCESS</b>\n\n"
             "You have been added as an administrator.\n\n"
             "Use /admin to open the Admin Panel.",
             parse_mode="HTML",
@@ -1206,7 +1206,7 @@ async def admin_back(callback: CallbackQuery):
         return
 
     await callback.message.edit_text(
-        "🛠️ <b>APNASTORE ADMIN PANEL</b>",
+        "🛠️ <b>Vouchora ADMIN PANEL</b>",
         reply_markup=admin_keyboard(),
         parse_mode="HTML"
     )
@@ -1519,7 +1519,7 @@ def product_categories():
 @dp.callback_query(F.data == "shop")
 async def shop_handler(callback: CallbackQuery):
     await callback.message.edit_text(
-        "🛍️ <b>APNASTORE SHOP</b>  •  <i>STORE</i>\n"
+        "🛍️ <b>Vouchora SHOP</b>  •  <i>STORE</i>\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
         "Find what you need and checkout in a few taps. ⚡\n\n"
         "🎬 <b>Entertainment</b>\n"
@@ -1733,7 +1733,7 @@ async def buy_product(callback: CallbackQuery):
         f"<code>{html.escape(stock_item['item'])}</code>\n\n"
         "⚠️ <i>Keep your delivered item private and secure.</i>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        "✅ <b>Thank you for shopping with ApnaStore!</b>",
+        "✅ <b>Thank you for shopping with Vouchora!</b>",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="📦 MY ORDERS", callback_data="orders", style="primary")],
             [InlineKeyboardButton(text="🏠 HOME", callback_data="home", style="primary")]
@@ -2297,7 +2297,7 @@ async def admin_broadcast_cancel(callback: CallbackQuery, state: FSMContext):
 
     await state.clear()
     await callback.message.edit_text(
-        "🛠️ <b>APNASTORE ADMIN PANEL</b>\n\n"
+        "🛠️ <b>Vouchora ADMIN PANEL</b>\n\n"
         "Choose an option below.",
         reply_markup=admin_keyboard(),
         parse_mode="HTML"
@@ -2424,7 +2424,7 @@ async def legacy_refer_handler(callback: CallbackQuery):
     await callback.message.edit_text(
         "🎁 <b>REFER & EARN</b>  •  <i>REWARDS</i>\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
-        "👥 Invite your friends to ApnaStore and earn rewards when the referral program is active. 🚀\n\n"
+        "👥 Invite your friends to Vouchora and earn rewards when the referral program is active. 🚀\n\n"
         "💎 <b>Referral Rewards</b>\n"
         "🎉 <b>Special Bonuses</b>\n"
         "📊 <b>Easy Tracking</b>\n\n"
@@ -2439,7 +2439,7 @@ async def legacy_refer_handler(callback: CallbackQuery):
 @dp.callback_query(F.data == "legacy_support")
 async def legacy_support_handler(callback: CallbackQuery):
     await callback.message.edit_text(
-        "💬 <b>APNASTORE SUPPORT</b>  •  <i>HELP CENTER</i>\n"
+        "💬 <b>Vouchora SUPPORT</b>  •  <i>HELP CENTER</i>\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
         "Need help with an order, payment or anything else? 🤝\n"
         "We're here to help you get it sorted.\n\n"
@@ -2447,7 +2447,7 @@ async def legacy_support_handler(callback: CallbackQuery):
         "📌 <b>For faster help</b>\n"
         "Please include your Order ID or relevant payment details when contacting support.\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        "💙 <i>ApnaStore Support Team</i>",
+        "💙 <i>Vouchora Support Team</i>",
         reply_markup=back_home_keyboard(),
         parse_mode="HTML"
     )
@@ -2607,14 +2607,14 @@ async def my_reviews(callback: CallbackQuery):
 async def support_handler_final(callback: CallbackQuery):
     from urllib.parse import quote
     templates={
-        "order":"Hello ApnaStore Support Team,\n\nI need assistance regarding my order/delivery.\n\nOrder ID: ______\nUser ID: {uid}\n\nPlease review my order and assist me.\n\nThank you,\nApnaStore Customer",
-        "payment":"Hello ApnaStore Support Team,\n\nI’m facing an issue with my wallet recharge.\n\nRequest ID: ______\nUTR / Transaction ID: ______\nUser ID: {uid}\n\nKindly review my payment and assist me.\n\nThank you,\nApnaStore Customer",
-        "wallet":"Hello ApnaStore Support Team,\n\nI need help with my wallet balance or transaction.\n\nUser ID: {uid}\nTransaction ID: ______\n\nPlease review and assist me.\n\nThank you,\nApnaStore Customer",
-        "product":"Hello ApnaStore Support Team,\n\nI’m facing an issue with a purchased product.\n\nProduct: ______\nOrder ID: ______\nUser ID: {uid}\n\nPlease review my order and assist me.\n\nThank you,\nApnaStore Customer",
-        "coupon":"Hello ApnaStore Support Team,\n\nI’m facing an issue while applying a coupon.\n\nCoupon Code: ______\nUser ID: {uid}\n\nKindly check and assist me.\n\nThank you,\nApnaStore Customer",
-        "referral":"Hello ApnaStore Support Team,\n\nI’m facing an issue regarding my referral or rewards.\n\nUser ID: {uid}\n\nKindly review my referral activity and assist me.\n\nThank you,\nApnaStore Customer",
-        "verification":"Hello ApnaStore Support Team,\n\nI’m unable to complete ApnaStore membership verification.\n\nUser ID: {uid}\n\nKindly assist me with the verification process.\n\nThank you,\nApnaStore Customer",
-        "account":"Hello ApnaStore Support Team,\n\nI need assistance with my ApnaStore account.\n\nUser ID: {uid}\n\nKindly review my account and assist me.\n\nThank you,\nApnaStore Customer",
+        "order":"Hello Vouchora Support Team,\n\nI need assistance regarding my order/delivery.\n\nOrder ID: ______\nUser ID: {uid}\n\nPlease review my order and assist me.\n\nThank you,\nVouchora Customer",
+        "payment":"Hello Vouchora Support Team,\n\nI’m facing an issue with my wallet recharge.\n\nRequest ID: ______\nUTR / Transaction ID: ______\nUser ID: {uid}\n\nKindly review my payment and assist me.\n\nThank you,\nVouchora Customer",
+        "wallet":"Hello Vouchora Support Team,\n\nI need help with my wallet balance or transaction.\n\nUser ID: {uid}\nTransaction ID: ______\n\nPlease review and assist me.\n\nThank you,\nVouchora Customer",
+        "product":"Hello Vouchora Support Team,\n\nI’m facing an issue with a purchased product.\n\nProduct: ______\nOrder ID: ______\nUser ID: {uid}\n\nPlease review my order and assist me.\n\nThank you,\nVouchora Customer",
+        "coupon":"Hello Vouchora Support Team,\n\nI’m facing an issue while applying a coupon.\n\nCoupon Code: ______\nUser ID: {uid}\n\nKindly check and assist me.\n\nThank you,\nVouchora Customer",
+        "referral":"Hello Vouchora Support Team,\n\nI’m facing an issue regarding my referral or rewards.\n\nUser ID: {uid}\n\nKindly review my referral activity and assist me.\n\nThank you,\nVouchora Customer",
+        "verification":"Hello Vouchora Support Team,\n\nI’m unable to complete Vouchora membership verification.\n\nUser ID: {uid}\n\nKindly assist me with the verification process.\n\nThank you,\nVouchora Customer",
+        "account":"Hello Vouchora Support Team,\n\nI need assistance with my Vouchora account.\n\nUser ID: {uid}\n\nKindly review my account and assist me.\n\nThank you,\nVouchora Customer",
     }
     def link(key): return "https://t.me/CR5PT?text="+quote(templates[key].format(uid=callback.from_user.id))
     kb=InlineKeyboardMarkup(inline_keyboard=[
@@ -2628,7 +2628,7 @@ async def support_handler_final(callback: CallbackQuery):
         [InlineKeyboardButton(text="👤 ACCOUNT PROBLEM",url=link("account"),style="primary")],
         [InlineKeyboardButton(text="🏠 HOME",callback_data="home",style="primary")]
     ])
-    await callback.message.edit_text("🆘 <b>APNASTORE HELP CENTER</b>\n━━━━━━━━━━━━━━━━━━━━\n\nChoose your issue. A professional ready-to-send message will open for @CR5PT.",reply_markup=kb,parse_mode="HTML"); await callback.answer()
+    await callback.message.edit_text("🆘 <b>Vouchora HELP CENTER</b>\n━━━━━━━━━━━━━━━━━━━━\n\nChoose your issue. A professional ready-to-send message will open for @CR5PT.",reply_markup=kb,parse_mode="HTML"); await callback.answer()
 
 # =========================================================
 # CUSTOMER: ACCOUNT
@@ -2850,7 +2850,7 @@ async def get_chat_id(message: Message):
 # =========================================================
 
 async def health_handler(request: web.Request):
-    return web.Response(text="ApnaStore Bot is running")
+    return web.Response(text="Vouchora Bot is running")
 
 
 async def start_health_server():
@@ -2880,7 +2880,7 @@ async def main():
 
     bot = Bot(token=BOT_TOKEN)
 
-    logger.info("ApnaStore Bot is running")
+    logger.info("Vouchora Bot is running")
     logger.info("UPI configured")
     logger.info("Admin configured")
 
