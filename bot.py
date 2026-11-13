@@ -30,7 +30,7 @@ logger = logging.getLogger("apnastore")
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR / ".env")
 
-BOT_TOKEN = os.getenv("9040892921:AAHNwJQ5d85SIDxCTBFuUptuaGLTLYtIyL0")
+BOT_TOKEN = ("9040892921:AAHNwJQ5d85SIDxCTBFuUptuaGLTLYtIyL0")
 
 ADMIN_ID = 7464364112
 
